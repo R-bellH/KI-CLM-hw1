@@ -113,15 +113,15 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
             _Qstate = learnFromHistory(oldState, newState);
             MoveQLearning(train);
         }
-        else // time to move
+        else if (AllowedToMove())// time to move
         {
-            if (AllowedToMove())
-            {
-                Console.WriteLine($"Agent {ID} is moving to {plannedMove}");
-                UpdateTable(plannedMove);
-                moveTo(plannedMove);
-            }
-            
+            Console.WriteLine($"Agent {ID} is moving to {plannedMove}");
+            UpdateTable(plannedMove);
+            moveTo(plannedMove);
+        }
+        else // cant move
+        {
+            plannedMove = Position;
         }
     }
 
@@ -164,6 +164,7 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
         var validActions = getValidActions(Position);
         if (validActions.Count == 0)
         {
+            plannedMove = Position;
             return;
         }
         var randomIndex = _random.Next(validActions.Count);
@@ -194,6 +195,7 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
             var (maxValue, bestAction) = maxActionQtable(_Qstate);
             if (bestAction == null)
             {
+                plannedMove = Position;
                 return;
             }
             if (maxValue <= -100)
