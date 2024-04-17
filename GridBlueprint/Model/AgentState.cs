@@ -5,5 +5,6 @@ public enum AgentState
     MoveRandomly,
     MoveWithBearing,
     MoveTowardsGoal,
-    ExploreAgents
+    ExploreAgents,
+    MoveQLearning
 }

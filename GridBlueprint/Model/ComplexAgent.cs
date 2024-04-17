@@ -1,12 +1,17 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using Mars.Common;
+using Mars.Components.Agents;
 using Mars.Interfaces.Agents;
 using Mars.Interfaces.Annotations;
 using Mars.Interfaces.Environments;
 using Mars.Interfaces.Layers;
 using Mars.Numerics;
+
+using System.IO;
+using Newtonsoft.Json;
 
 namespace GridBlueprint.Model;
 
@@ -23,11 +28,62 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
     {
         _layer = layer;
         Position = new Position(StartX, StartY);
-        _state = AgentState.MoveTowardsGoal;  // Initial state of the agent. Is overwritten eventually in Tick()
+        _state = AgentState.MoveQLearning; // my code
         _directions = CreateMovementDirectionsList();
         _layer.ComplexAgentEnvironment.Insert(this);
+        _QLearningRewards = CreateQLearningRewards();
+        _Qstate = GetCurrentState();
+        LoadQTable(_fileName);
     }
+    
+    public void SaveQTable(string filePath)
+    {
+        if (train)
+        {
+            Console.WriteLine("Saving QTable");
+            string str = "";
+            foreach (var key in _Qtable.Keys)
+            {
 
+                str += $"?{key} %{_Qtable[key]}\n";
+            }
+
+            // save as txt file
+            File.WriteAllText(filePath, str);
+        }
+    }
+    public void LoadQTable(string filePath)
+    {
+        if (File.Exists(filePath))
+        {
+            Console.WriteLine("Loading QTable");
+            var json = File.ReadAllText(filePath);
+            // split by new line
+            string[] lines = json.Split("\n");
+            foreach (var line in lines)
+            {
+                if (line != "")
+                {
+                    string stateStringFromKey = line.Split("?(")[1].Split("!")[0];
+                    KnownState state = KnownState.FromString(stateStringFromKey);
+                    string actionStringFromKey = line.Split("!")[1].Split(")")[0].Split("(")[1];
+                    // get action from string in the format x,y
+                    string[] actionString = actionStringFromKey.Split(",");
+                    Position action = new Position(int.Parse(actionString[0]), int.Parse(actionString[1]));
+                    double value = double.Parse(line.Split("%")[1]);
+                    if (_Qtable.ContainsKey((state.ToString(), action)))
+                    {
+                        Console.WriteLine("weired you alredy have this key in the QTable");
+                        Console.WriteLine($"key: ({state} {action})");
+                        Console.WriteLine($"with this value: {_Qtable[(state.ToString(), action)]}");
+                        Console.WriteLine($"you tried to enter the new value: {value}");
+                        
+                    }
+                    _Qtable[(state.ToString(), action)] = value;
+                }
+            }
+        }
+    }
     #endregion
 
     #region Tick
@@ -39,30 +95,21 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
     /// </summary>
     public void Tick()
     {
-        // Chooses random state if trip is no longer in progress. Comment this out if the agent should keep its initial state.
-        _state = RandomlySelectNewState();
-        
-        if (_state == AgentState.MoveRandomly)
+        if (_layer.IsExit((int)Position.X, (int)Position.Y))
         {
-            MoveRandomly();
-        }
-        else if (_state == AgentState.MoveWithBearing)
-        {
-            MoveWithBearing();
-        }
-        else if (_state == AgentState.MoveTowardsGoal)
-        {
-            MoveTowardsGoal();
-        }
-        else if (_state == AgentState.ExploreAgents)
-        {
-            ExploreAgents();
-        }
-        
-        if (_layer.GetCurrentTick() == 595)
-        {
+            SaveQTable(_fileName);
             RemoveFromSimulation();
         }
+        _currentTick++;
+        if (_currentTick % 100 == 0)
+        {
+            SaveQTable(_fileName);
+        }
+        var oldState = _Qstate;
+        KnownState newState = GetCurrentState();
+        _Qstate = learnFromHistory(oldState, newState);
+        
+        MoveQLearning(train);
     }
 
     #endregion
@@ -87,136 +134,186 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
             MovementDirections.Northwest
         };
     }
-    
+
+    private void UpdateTable(Position action)
+    {
+        double stateActionReward= getReward(_Qstate, action);
+        KnownState nextState = expectedState(_Qstate, action);
+        double nextStateReward = maxActionQtable(nextState).Item1;
+        double qValue = stateActionReward + (_gamma * nextStateReward);
+        _Qtable[(_Qstate.ToString(), action)] = qValue;
+    }
     /// <summary>
     ///     Performs one random move, if possible, using the movement directions list.
     /// </summary>
     private void MoveRandomly()
     {
-        var nextDirection = _directions[_random.Next(_directions.Count)];
-        var newX = Position.X + nextDirection.X;
-        var newY = Position.Y + nextDirection.Y;
+        var validActions = getValidActions(Position);
+        if (validActions.Count == 0)
+        {
+            return;
+        }
+        var randomIndex = _random.Next(validActions.Count);
+        var action = validActions[randomIndex];
+        UpdateTable(action);
+        moveTo(action);
+    }
+    private static List<Double> CreateQLearningRewards()
+    {
+        return new List<Double>
+        {
+            rewardsQLearning.exitReward,
+            rewardsQLearning.inTheRoomReward,
+            rewardsQLearning.nextToWallReward,
+            rewardsQLearning.collisionReward,
+            rewardsQLearning.findDoorReward
+        };
+    }
+
+    private void MoveQLearning(bool train)
+    {
+        if (train)
+            MoveRandomly(); // train session
+        else
+        {
+            //get best action given the current state
+            var (maxValue, bestAction) = maxActionQtable(_Qstate);
+            if (bestAction == null)
+            {
+                return;
+            }
+            if (maxValue <= -100)
+            {
+                MoveRandomly();
+                return;
+            }
+            UpdateTable(bestAction);
+            Console.WriteLine($"agent {ID} moved to {bestAction}");
+            moveTo(bestAction);            
+        }
+
+    }
+
+    private List<Position> getValidActions(Position curPosition)
+    {
+        List<Position> validActions = new List<Position>();
+        foreach (var direction in _directions)
+        {
+            var newX = curPosition.X + direction.X;
+            var newY = curPosition.Y + direction.Y;
+            Position nextPosition = new Position(newX, newY);
+            if (tryMoveTo(nextPosition))
+            {
+                validActions.Add(nextPosition);
+            }
+        }
+        return validActions;
+    }
+    private Double getReward(KnownState state, Position action)
+    {
+        if (state.Exit!=null && state.Exit.Equals(action))
+        {
+            return rewardsQLearning.exitReward;
+        }
+        if (state.Walls.Contains(action))
+        {
+            return rewardsQLearning.nextToWallReward;
+        }
+        if (state.NearbyAgents.Contains(action))
+        {
+            return rewardsQLearning.collisionReward;
+        }
+        if (state.Doors.Contains(action))
+        {
+            return rewardsQLearning.findDoorReward;
+        }
+        return rewardsQLearning.inTheRoomReward;
+    }
+    
+    private List<Position> lookForAgentsLocations()
+    {
+        // Get all nearby Agents instances
+        var simpleAgents = _layer.SimpleAgentEnvironment.Explore(Position, radius: AgentExploreRadius);
+        var complexAgents = _layer.ComplexAgentEnvironment.Explore(Position, radius: AgentExploreRadius);
         
-        // Check if chosen move is within the bounds of the grid
+        List<Position> simpleAgentsPositions =simpleAgents.Select(agent => agent.Position).ToList();
+        List<Position> complexAgentsPositions =complexAgents.Select(agent => agent.Position).ToList();
+        List<Position> agentPositons = new List<Position>();
+        agentPositons.AddRange(simpleAgentsPositions);
+        agentPositons.AddRange(complexAgentsPositions);
+        // Remove the current agent's position
+        agentPositons.Remove(Position);
+        
+        // Select and return their positions
+        return agentPositons;
+    }
+
+    private bool aboutToCollide(Position nextPosition)
+    {
+        var agentsPositions = lookForAgentsLocations();
+        return agentsPositions.Contains(nextPosition);
+    }
+    
+    private bool tryMoveTo(Position nextPosition)
+    {
+        var newX = nextPosition.X;
+        var newY = nextPosition.Y;
+        Position oldPosition = Position;
         if (0 <= newX && newX < _layer.Width && 0 <= newY && newY < _layer.Height)
         {
             // Check if chosen move goes to a cell that is routable
             if (_layer.IsRoutable(newX, newY))
             {
-                Position = new Position(newX, newY);
-                _layer.ComplexAgentEnvironment.MoveTo(this, new Position(newX, newY));
-                Console.WriteLine($"{GetType().Name} moved to a new cell: {Position}");
+                if (aboutToCollide(nextPosition))
+                {
+                    // Console.WriteLine($"{GetType().Name} tried to collide at: {Position}");
+                    return false;
+                }
+                // Console.WriteLine($"{GetType().Name} moved to a new cell: {Position}");
+                return true;
             }
-            else
+            // Console.WriteLine($"{GetType().Name} tried to move to a blocked cell: ({newX}, {newY})");
+            return false;
+        }
+        // Console.WriteLine($"{GetType().Name} tried to leave the world: ({newX}, {newY})");
+        return false;
+    }
+    private void moveTo(Position nextPosition)
+    {
+        Position = nextPosition;
+        _layer.ComplexAgentEnvironment.MoveTo(this, nextPosition);
+    }
+
+    private (double,Position) maxActionQtable(KnownState qState)
+    {
+        double maxValue = -100;
+        Position bestAction = null;
+        var expectedReward = 0.0;
+        var newPos = qState.SelfPosition;
+        var validActions = getValidActions(newPos);
+        foreach (var action in validActions)
+        {
+            // expectedReward = getReward(qState, action);
+            // if (expectedReward > maxValue)
+            // {
+            //     maxValue = expectedReward;
+            //     bestAction = action;
+            // }
+            if (!_Qtable.ContainsKey((qState.ToString(), action)))
             {
-                Console.WriteLine($"{GetType().Name} tried to move to a blocked cell: ({newX}, {newY})");
+                _Qtable[(qState.ToString(), action)] = getReward(qState, action);
             }
-        }
-        else
-        {
-            Console.WriteLine($"{GetType().Name} tried to leave the world: ({newX}, {newY})");
-        }
-    }
-
-    /// <summary>
-    ///     Moves the agent towards a random routable adjacent cell via a calculated bearing.
-    /// </summary>
-    private void MoveWithBearing()
-    {
-        var goal = FindRoutableGoal();
-        var bearing = PositionHelper.CalculateBearingCartesian(Position.X, Position.Y, goal.X, goal.Y);
-        var curPos = Position;
-        var newPos = _layer.ComplexAgentEnvironment.MoveTowards(this, bearing, 1);
-        if (!_layer.IsRoutable(newPos))
-        {
-            Position = curPos;
-            Console.WriteLine("Rollback");
-        }
-    }
-
-    /// <summary>
-    ///     Moves the agent one step along the shortest routable path towards a fixed goal.
-    /// </summary>
-    private void MoveTowardsGoal()
-    {
-        if (!_tripInProgress)
-        {
-            // Explore nearby grid cells based on their values
-            _goal = FindRoutableGoal(MaxTripDistance);
-            _path = _layer.FindPath(Position, _goal).GetEnumerator();
-            _tripInProgress = true;
-        }
-        
-        if (_path.MoveNext())
-        {
-            _layer.ComplexAgentEnvironment.MoveTo(this, _path.Current, 1);
-            if (Position.Equals(_goal))
+            if (_Qtable[(qState.ToString(), action)]>maxValue)
             {
-                Console.WriteLine($"ComplexAgent {ID} reached goal {_goal}");
-                _tripInProgress = false;
+                maxValue = _Qtable[(qState.ToString(), action)];
+                bestAction = action;
             }
         }
+
+        return (maxValue, bestAction);
     }
-
-    /// <summary>
-    ///     Finds a routable grid cell that serves as a goal for subsequent pathfinding.
-    /// </summary>
-    /// <param name="maxDistanceToGoal">The maximum distance in grid cells between the agent's position and its goal</param>
-    /// <returns>The found grid cell</returns>
-    private Position FindRoutableGoal(double maxDistanceToGoal = 1.0)
-    {
-        var nearbyRoutableCells = _layer.Explore(Position, radius: maxDistanceToGoal, predicate: cellValue => cellValue == 0.0).ToList();
-        var goal = nearbyRoutableCells[_random.Next(nearbyRoutableCells.Count)].Node.NodePosition;
-
-        // in case only one cell is routable, use directly no need to random!
-        // other vise, try to find a cell we are not coming from
-        if (nearbyRoutableCells.Count > 1)
-        {
-            while (Position.Equals(goal))
-            {
-                goal = nearbyRoutableCells[_random.Next(nearbyRoutableCells.Count)].Node.NodePosition;
-            }
-        }
-        
-        Console.WriteLine($"New goal: {goal}");
-        return goal;
-    }
-
-    /// <summary>
-    ///     Explores the environment for agents of another type and increments their counter if they are nearby.
-    /// </summary>
-    private void ExploreAgents()
-    {
-        // Explore nearby other SimpleAgent instances
-        var agents = _layer.SimpleAgentEnvironment.Explore(Position, radius: AgentExploreRadius);
-
-        foreach (var agent in agents)
-        {
-            if (Distance.Chebyshev(new []{Position.X, Position.Y}, new []{agent.Position.X, agent.Position.Y}) <= 1.0)
-            {
-                agent.IncrementCounter();
-            }
-        }
-    }
-
-    /// <summary>
-    ///     Selects a new state from the AgentState enumeration to guide for subsequent behavior.
-    ///     Will return the current state if a route is still in progress.
-    /// </summary>
-    /// <returns>The selected state</returns>
-    private AgentState RandomlySelectNewState()
-    {
-        if (_state == AgentState.MoveTowardsGoal && _tripInProgress)
-        {
-            Console.WriteLine("Trip still in progress, so no state change.");
-            return AgentState.MoveTowardsGoal;
-        }
-
-        var agentStates = Enum.GetValues(typeof(AgentState));
-        var newState = (AgentState) agentStates.GetValue(_random.Next(agentStates.Length))!;
-        Console.WriteLine($"New state: {newState}");
-        return newState;
-    }
+    
+    // end of my code
 
     /// <summary>
     ///     Removes this agent from the simulation and, by extension, from the visualization.
@@ -228,6 +325,117 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
         UnregisterAgentHandle.Invoke(_layer, this);
     }
 
+    public KnownState GetCurrentState()
+    {
+        var (walls, doors, exit) = Explore();
+        var currentState = new KnownState
+        {
+            SelfPosition = Position,
+            NearbyAgents = lookForAgentsLocations(),
+            Walls = walls,
+            Doors = doors,
+            Exit = exit
+        };
+
+        return currentState;
+    }
+    // explore the environment: walls, doors, exit
+    private (List<Position>,List<Position>, Position) Explore()
+    {
+        List<Position> walls = new List<Position>();
+        List<Position> doors = new List<Position>();
+        Position exit = null;
+        var currX= (int) Position.X;
+        var currY= (int) Position.Y;
+        
+        for (int i = -1; i <= AgentExploreRadius; i++)
+        {
+            for (int j = -1; j <= AgentExploreRadius; j++)
+            {
+                var newX = currX + i;
+                var newY = currY + j;
+                if (0 <= newX && newX < _layer.Width && 0 <= newY && newY < _layer.Height)
+                {
+                    if (_layer.IsDoor(newX, newY))
+                    {
+                        doors.Add(new Position(newX, newY));
+                    }
+                    else if (_layer.IsExit(newX, newY))
+                    {
+                        exit = new Position(newX, newY);
+                    }
+                    else if (!_layer.IsRoutable(newX, newY))
+                    {
+                        walls.Add(new Position(newX, newY));
+                    }
+                }
+            }
+        }
+        return (walls, doors, exit);
+    }
+    
+    
+    private KnownState learnFromHistory(KnownState oldState, KnownState newState)
+    {
+        // Extend SelfPosition
+        if (newState.SelfPosition == null)
+        {
+            newState.SelfPosition = oldState.SelfPosition;
+        }
+
+        // Extend Walls
+        if (newState.Walls == null)
+        {
+            newState.Walls = oldState.Walls;
+        }
+        else
+        {
+            foreach (var wall in oldState.Walls)
+            {
+                if (!newState.Walls.Contains(wall))
+                {
+                    newState.Walls.Add(wall);
+                }
+            }
+        }
+
+        // Extend Doors
+        if (newState.Doors == null)
+        {
+            newState.Doors = oldState.Doors;
+        }
+        else
+        {
+            foreach (var door in oldState.Doors)
+            {
+                if (!newState.Doors.Contains(door))
+                {
+                    newState.Doors.Add(door);
+                }
+            }
+        }
+
+        // Extend Exit
+        if (newState.Exit == null)
+        {
+            newState.Exit = oldState.Exit;
+        }
+
+        return newState;
+    }
+    
+    private KnownState expectedState(KnownState oldState, Position action)
+    {
+        KnownState newState = new KnownState
+        {
+            SelfPosition = action,
+            NearbyAgents = oldState.NearbyAgents,
+            Walls = oldState.Walls,
+            Doors = oldState.Doors,
+            Exit = oldState.Exit
+        };
+        return newState;
+    }
     #endregion
 
     #region Fields and Properties
@@ -257,6 +465,13 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
     private bool _tripInProgress;
     private AgentState _state;
     private List<Position>.Enumerator _path;
-
+    // my code
+    private List<Double> _QLearningRewards;
+    private KnownState _Qstate;
+    private ConcurrentDictionary<(string, Position),Double> _Qtable = new ConcurrentDictionary<(string, Position), Double>();
+    private double _gamma = 0.8;
+    private int _currentTick=1;
+    private string _fileName = "C:\\Users\\loonn\\RiderProjects\\blueprint-grid\\GridBlueprint\\Resources\\QTable.txt";
+    private bool train = false;
     #endregion
 }

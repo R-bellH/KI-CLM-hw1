@@ -47,7 +47,9 @@ public class GridLayer : RasterLayer
     /// <param name="x">x-coordinate of grid cell</param>
     /// <param name="y">y-coordinate of grid cell</param>
     /// <returns>Boolean representing if (x,y) is accessible</returns>
-    public override bool IsRoutable(int x, int y) => this[x, y] == 0;
+    public override bool IsRoutable(int x, int y) => this[x, y] != 1;
+    public bool IsDoor(int x, int y) => this[x, y] == 2;// my code
+    public bool IsExit(int x, int y) => this[x, y] == 3;// my code
 
     #endregion
 
