@@ -246,11 +246,13 @@ class Visualization:
             pygame.draw.polygon(surface, ORANGE, pointlist, line_width)
 
         for type_key in self.entities.keys():
+            print(type_key)
             for entity in self.entities[type_key]:
+                print(f"entity {entity}")
                 x = entity["x"]
                 y = entity["y"]
 
-                pygame.draw.circle(surface, AGENT_COLORS[type_key % len(AGENT_COLORS)],
+                pygame.draw.circle(surface, AGENT_COLORS[entity["key"] % len(AGENT_COLORS)],
                                    (((x - self.WORLD_SIZE[0]) * scale_x + scale_x / 2),
                                     ((y - self.WORLD_SIZE[1]) * scale_y) + scale_y / 2),
                                    line_width * agent_size, 0)

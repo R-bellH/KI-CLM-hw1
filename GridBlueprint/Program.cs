@@ -10,7 +10,6 @@ internal static class Program
 {
     private static void Main()
     {
-        bool training = true;
         int episodes = 1;
         // Create a new model description and add model components to it
         var description = new ModelDescription();
@@ -22,7 +21,7 @@ internal static class Program
         // Load the simulation configuration from a JSON configuration file
         var file = File.ReadAllText("config.json");
         var config = SimulationConfig.Deserialize(file);
-        for (int i = 0; i < episodes; i++)
+        for (var i = 0; i < episodes; i++)
         {
             // Couple model description and simulation configuration
             var starter = SimulationStarter.Start(description, config);

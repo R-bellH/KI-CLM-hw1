@@ -11,6 +11,7 @@ using Mars.Interfaces.Layers;
 using Mars.Numerics;
 
 using System.IO;
+using System.Threading;
 using Newtonsoft.Json;
 
 namespace GridBlueprint.Model;
@@ -28,10 +29,9 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
     {
         _layer = layer;
         Position = new Position(StartX, StartY);
-        _state = AgentState.MoveQLearning; // my code
+        _state = AgentState.MoveQLearning;
         _directions = CreateMovementDirectionsList();
         _layer.ComplexAgentEnvironment.Insert(this);
-        _QLearningRewards = CreateQLearningRewards();
         _Qstate = GetCurrentState();
         LoadQTable(_fileName);
     }
@@ -105,11 +105,24 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
         {
             SaveQTable(_fileName);
         }
-        var oldState = _Qstate;
-        KnownState newState = GetCurrentState();
-        _Qstate = learnFromHistory(oldState, newState);
-        
-        MoveQLearning(train);
+
+        if (_currentTick % 2 == 0) // make plan
+        {
+            var oldState = _Qstate;
+            KnownState newState = GetCurrentState();
+            _Qstate = learnFromHistory(oldState, newState);
+            MoveQLearning(train);
+        }
+        else // time to move
+        {
+            if (AllowedToMove())
+            {
+                Console.WriteLine($"Agent {ID} is moving to {plannedMove}");
+                UpdateTable(plannedMove);
+                moveTo(plannedMove);
+            }
+            
+        }
     }
 
     #endregion
@@ -155,8 +168,9 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
         }
         var randomIndex = _random.Next(validActions.Count);
         var action = validActions[randomIndex];
-        UpdateTable(action);
-        moveTo(action);
+        plannedMove = action;
+        // UpdateTable(action);
+        // moveTo(action);
     }
     private static List<Double> CreateQLearningRewards()
     {
@@ -187,9 +201,10 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
                 MoveRandomly();
                 return;
             }
-            UpdateTable(bestAction);
-            Console.WriteLine($"agent {ID} moved to {bestAction}");
-            moveTo(bestAction);            
+
+            plannedMove = bestAction;
+            // UpdateTable(bestAction);
+            // moveTo(bestAction);            
         }
 
     }
@@ -248,10 +263,30 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
         return agentPositons;
     }
 
-    private bool aboutToCollide(Position nextPosition)
+    private bool StationaryCollision(Position nextPosition)
     {
         var agentsPositions = lookForAgentsLocations();
         return agentsPositions.Contains(nextPosition);
+    }
+
+    private bool AllowedToMove() //currently only check for complex agents
+    {
+        bool priority = true;
+        IEnumerable<ComplexAgent> otherAgents = _layer.ComplexAgentEnvironment.Explore(Position, radius: AgentExploreRadius, -1,agentInEnvironment => !agentInEnvironment.Position.Equals(Position));
+        List<ComplexAgent> possibleCollisions = new List<ComplexAgent>();
+        foreach (var agent in otherAgents)
+        {
+            bool plannedMoveColission = (agent.plannedMove.X == plannedMove.X && agent.plannedMove.Y == plannedMove.Y);
+            bool standingStillCollision = (agent.Position.X == plannedMove.X && agent.Position.Y == plannedMove.Y);
+            if (plannedMoveColission || standingStillCollision)
+            {
+                possibleCollisions.Add(agent);
+            }
+        }
+        // check priority (who have the highest need to leave, i.e. children etc.)
+        priority = !possibleCollisions.Any(agent => agent.ID.CompareTo(ID) >= 0);
+
+        return priority;
     }
     
     private bool tryMoveTo(Position nextPosition)
@@ -264,7 +299,7 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
             // Check if chosen move goes to a cell that is routable
             if (_layer.IsRoutable(newX, newY))
             {
-                if (aboutToCollide(nextPosition))
+                if (StationaryCollision(nextPosition))
                 {
                     // Console.WriteLine($"{GetType().Name} tried to collide at: {Position}");
                     return false;
@@ -312,8 +347,6 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
 
         return (maxValue, bestAction);
     }
-    
-    // end of my code
 
     /// <summary>
     ///     Removes this agent from the simulation and, by extension, from the visualization.
@@ -465,13 +498,13 @@ public class ComplexAgent : IAgent<GridLayer>, IPositionable
     private bool _tripInProgress;
     private AgentState _state;
     private List<Position>.Enumerator _path;
-    // my code
-    private List<Double> _QLearningRewards;
     private KnownState _Qstate;
     private ConcurrentDictionary<(string, Position),Double> _Qtable = new ConcurrentDictionary<(string, Position), Double>();
     private double _gamma = 0.8;
     private int _currentTick=1;
     private string _fileName = "C:\\Users\\loonn\\RiderProjects\\blueprint-grid\\GridBlueprint\\Resources\\QTable.txt";
+    private Position plannedMove;
     private bool train = false;
+
     #endregion
 }
